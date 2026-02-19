@@ -200,11 +200,35 @@ export class BountyBoard {
     const params = await this.getSuggestedParams();
     const deadline = Math.floor(Date.now() / 1000) + (deadlineDays * 24 * 60 * 60);
 
+    // Calculate MBR (Minimum Balance Requirement) for box storage
+    // Box MBR formula: 2,500 + 400 * box_size (in microAlgos)
+    // Fixed boxes: _client(32), _freelancer(32), _amount(8), _deadline(8), _status(8), _proof(1)
+    const fixedBoxesMBR = 
+      (2500 + 400 * 32) +  // _client
+      (2500 + 400 * 32) +  // _freelancer
+      (2500 + 400 * 8) +   // _amount
+      (2500 + 400 * 8) +   // _deadline
+      (2500 + 400 * 8) +   // _status
+      (2500 + 400 * 1);    // _proof
+    
+    // Variable boxes: _title, _description
+    const variableBoxesMBR = 
+      (2500 + 400 * title.length) + 
+      (2500 + 400 * description.length);
+    
+    const totalMBR = fixedBoxesMBR + variableBoxesMBR;
+    const totalPaymentMicroAlgos = (amount * 1_000_000) + totalMBR;
+
+    console.log(`Task creation payment breakdown:
+      - Bounty amount: ${amount} ALGO (${amount * 1_000_000} microAlgos)
+      - Box storage MBR: ${(totalMBR / 1_000_000).toFixed(4)} ALGO (${totalMBR} microAlgos)
+      - Total payment: ${(totalPaymentMicroAlgos / 1_000_000).toFixed(4)} ALGO`);
+
     // Payment transaction
     const paymentTxn = algosdk.makePaymentTxnWithSuggestedParamsFromObject({
       sender: sender,
       receiver: this.appAddress,
-      amount: amount * 1_000_000,
+      amount: totalPaymentMicroAlgos,
       suggestedParams: params
     });
 
@@ -216,10 +240,41 @@ export class BountyBoard {
       algosdk.encodeUint64(deadline)
     ];
 
+    // Get task counter for box references
+    const algodClient = new algosdk.Algodv2('', 'https://testnet-api.algonode.cloud', '');
+    const appInfo = await algodClient.getApplicationByID(this.appId).do();
+    const globalState = appInfo.params.globalState;
+    const taskCounterKey = Buffer.from('task_counter').toString('base64');
+    let taskId = 0;
+    
+    if (globalState) {
+      for (const kv of globalState) {
+        // kv.key is base64 encoded string from algod API
+        if ((kv.key as any) === taskCounterKey) {
+          taskId = Number(kv.value.uint);
+          break;
+        }
+      }
+    }
+
+    // Box references for the new task
+    const taskIdBytes = algosdk.encodeUint64(taskId);
+    const boxReferences = [
+      { appIndex: this.appId, name: new Uint8Array([...taskIdBytes, ...(Buffer.from('_client'))]) },
+      { appIndex: this.appId, name: new Uint8Array([...taskIdBytes, ...(Buffer.from('_freelancer'))]) },
+      { appIndex: this.appId, name: new Uint8Array([...taskIdBytes, ...(Buffer.from('_amount'))]) },
+      { appIndex: this.appId, name: new Uint8Array([...taskIdBytes, ...(Buffer.from('_deadline'))]) },
+      { appIndex: this.appId, name: new Uint8Array([...taskIdBytes, ...(Buffer.from('_status'))]) },
+      { appIndex: this.appId, name: new Uint8Array([...taskIdBytes, ...(Buffer.from('_title'))]) },
+      { appIndex: this.appId, name: new Uint8Array([...taskIdBytes, ...(Buffer.from('_description'))]) },
+      { appIndex: this.appId, name: new Uint8Array([...taskIdBytes, ...(Buffer.from('_proof'))]) },
+    ];
+
     const appCallTxn = algosdk.makeApplicationNoOpTxnFromObject({
       sender: sender,
       appIndex: this.appId,
       appArgs,
+      boxes: boxReferences,
       suggestedParams: params
     });
 

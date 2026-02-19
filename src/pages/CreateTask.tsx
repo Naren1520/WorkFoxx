@@ -1,4 +1,4 @@
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useWallet } from '../WalletProvider';
 import { useNavigate } from 'react-router-dom';
 import { BountyBoard } from '../frontend-integration';
@@ -18,6 +18,24 @@ export default function CreateTask() {
     days: '7'
   });
   const [loading, setLoading] = useState(false);
+  const [walletBalance, setWalletBalance] = useState<number | null>(null);
+
+  // Fetch wallet balance
+  useEffect(() => {
+    const fetchBalance = async () => {
+      if (!activeAddress) return;
+      
+      try {
+        const algodClient = new algosdk.Algodv2('', 'https://testnet-api.algonode.cloud', '');
+        const accountInfo = await algodClient.accountInformation(activeAddress).do();
+        setWalletBalance(Number(accountInfo.amount) / 1_000_000);
+      } catch (error) {
+        console.error('Failed to fetch balance:', error);
+      }
+    };
+
+    fetchBalance();
+  }, [activeAddress]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -38,19 +56,39 @@ export default function CreateTask() {
       return;
     }
 
+    // Check if amount is within reasonable limits
+    // Calculate MBR for box storage
+    const fixedBoxesMBR = (2500 + 400 * 32) + (2500 + 400 * 32) + (2500 + 400 * 8) + (2500 + 400 * 8) + (2500 + 400 * 8) + (2500 + 400 * 1);
+    const variableBoxesMBR = (2500 + 400 * formData.title.length) + (2500 + 400 * formData.description.length);
+    const totalMBR = (fixedBoxesMBR + variableBoxesMBR) / 1_000_000;
+    
+    // User needs: task amount + MBR + 0.1 ALGO (min balance) + 0.002 ALGO (fees)
+    const totalNeeded = amount + totalMBR + 0.102;
+    
+    // Get account balance
+    try {
+      const algodClient = new algosdk.Algodv2('', 'https://testnet-api.algonode.cloud', '');
+      const accountInfo = await algodClient.accountInformation(activeAddress).do();
+      const balance = Number(accountInfo.amount) / 1_000_000;
+
+      if (balance < totalNeeded) {
+        toast.error(`Insufficient balance! You have ${balance.toFixed(3)} ALGO but need ${totalNeeded.toFixed(3)} ALGO (bounty: ${amount}, storage: ${totalMBR.toFixed(3)}, fees: 0.102)`);
+        return;
+      }
+    } catch (error) {
+      console.warn('Could not check balance, proceeding anyway:', error);
+    }
+
     try {
       setLoading(true);
 
-      // Calculate deadline
-      const deadline = Math.floor(Date.now() / 1000) + (parseInt(formData.days) * 24 * 60 * 60);
-
-      // Create transactions
+      // Create transactions (BountyBoard.createTask handles deadline calculation)
       const txns = await bountyBoard.createTask(
         activeAddress,
         formData.title,
         formData.description,
-        deadline,
-        amount
+        amount,
+        parseInt(formData.days)
       );
 
       // Encode transactions
@@ -137,19 +175,50 @@ export default function CreateTask() {
                     <label className="label">
                       Reward Amount (ALGO) *
                     </label>
-                    <input
-                      type="number"
-                      step="0.1"
-                      min="0.1"
-                      value={formData.amount}
-                      onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
-                      placeholder="10.0"
-                      className="input"
-                      required
-                    />
-                    <p className="mt-1 text-sm text-gray-500">
-                      Minimum: 0.1 ALGO
-                    </p>
+                    <div className="relative">
+                      <input
+                        type="number"
+                        step="0.1"
+                        min="0.1"
+                        value={formData.amount}
+                        onChange={(e) => setFormData({ ...formData, amount: e.target.value })}
+                        placeholder="1.0"
+                        className="input"
+                        required
+                      />
+                      {walletBalance !== null && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            // Calculate MBR for current title/description
+                            const fixedBoxesMBR = (2500 + 400 * 32) + (2500 + 400 * 32) + (2500 + 400 * 8) + (2500 + 400 * 8) + (2500 + 400 * 8) + (2500 + 400 * 1);
+                            const variableBoxesMBR = (2500 + 400 * formData.title.length) + (2500 + 400 * formData.description.length);
+                            const totalMBR = (fixedBoxesMBR + variableBoxesMBR) / 1_000_000;
+                            
+                            // Reserve: MBR + min balance (0.1) + fees (0.05)
+                            const reserved = totalMBR + 0.15;
+                            const maxAmount = Math.max(0, walletBalance - reserved);
+                            setFormData({ ...formData, amount: maxAmount.toFixed(2) });
+                          }}
+                          className="absolute right-2 top-2 text-xs text-indigo-600 hover:text-indigo-800 font-medium"
+                        >
+                          MAX
+                        </button>
+                      )}
+                    </div>
+                    <div className="mt-1 flex justify-between text-sm">
+                      <span className="text-gray-500">Minimum: 0.1 ALGO</span>
+                      {walletBalance !== null && (
+                        <span className="text-gray-700 font-medium">
+                          Balance: {walletBalance.toFixed(3)} ALGO
+                        </span>
+                      )}
+                    </div>
+                    {walletBalance !== null && walletBalance < 0.2 && (
+                      <p className="mt-1 text-xs text-red-600">
+                        ⚠️ Low balance! Get TestNet ALGO from: bank.testnet.algorand.network
+                      </p>
+                    )}
                   </div>
 
                   <div>
@@ -173,27 +242,42 @@ export default function CreateTask() {
 
                 {/* Summary */}
                 <div className="bg-gray-50 rounded-lg p-4">
-                  <h3 className="font-medium text-gray-900 mb-3">Summary</h3>
+                  <h3 className="font-medium text-gray-900 mb-3">Cost Breakdown</h3>
                   <div className="space-y-2 text-sm">
                     <div className="flex justify-between">
                       <span className="text-gray-600">Task Reward:</span>
                       <span className="font-medium">{formData.amount || '0'} ALGO</span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-gray-600">Transaction Fee:</span>
-                      <span className="font-medium">~0.002 ALGO</span>
+                      <span className="text-gray-600">Blockchain Storage (MBR):</span>
+                      <span className="font-medium">
+                        {(() => {
+                          const fixedBoxesMBR = (2500 + 400 * 32) + (2500 + 400 * 32) + (2500 + 400 * 8) + (2500 + 400 * 8) + (2500 + 400 * 8) + (2500 + 400 * 1);
+                          const variableBoxesMBR = (2500 + 400 * formData.title.length) + (2500 + 400 * formData.description.length);
+                          const totalMBR = (fixedBoxesMBR + variableBoxesMBR) / 1_000_000;
+                          return totalMBR.toFixed(4);
+                        })()} ALGO
+                      </span>
                     </div>
                     <div className="flex justify-between">
-                      <span className="text-gray-600">Box Storage:</span>
-                      <span className="font-medium">~0.02 ALGO</span>
+                      <span className="text-gray-600">Transaction Fee:</span>
+                      <span className="font-medium">~0.002 ALGO</span>
                     </div>
                     <div className="border-t pt-2 mt-2 flex justify-between">
                       <span className="text-gray-900 font-medium">Total Cost:</span>
                       <span className="font-bold text-indigo-600">
-                        ~{(parseFloat(formData.amount || '0') + 0.022).toFixed(3)} ALGO
+                        {(() => {
+                          const fixedBoxesMBR = (2500 + 400 * 32) + (2500 + 400 * 32) + (2500 + 400 * 8) + (2500 + 400 * 8) + (2500 + 400 * 8) + (2500 + 400 * 1);
+                          const variableBoxesMBR = (2500 + 400 * formData.title.length) + (2500 + 400 * formData.description.length);
+                          const totalMBR = (fixedBoxesMBR + variableBoxesMBR) / 1_000_000;
+                          return (parseFloat(formData.amount || '0') + totalMBR + 0.002).toFixed(4);
+                        })()} ALGO
                       </span>
                     </div>
                   </div>
+                  <p className="mt-3 text-xs text-gray-500">
+                    💡 MBR (Minimum Balance Requirement) covers on-chain storage costs. It increases with title/description length.
+                  </p>
                 </div>
               </div>
             </div>
